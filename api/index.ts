@@ -1,225 +1,323 @@
-import * as httpModule from 'http';
-import * as httpsModule from 'https';
-import { outputConsole, currentWorkspaceFolder } from '../utils';
-import { config } from '../extension';
+import * as httpModule from "http";
+import * as httpsModule from "https";
+import * as request from "request-promise";
+import * as url from "url";
+import * as vscode from "vscode";
+import * as Cache from "vscode-cache";
+import {
+  config,
+  extensionContext,
+  FILESYSTEM_SCHEMA,
+  workspaceState,
+} from "../extension";
+import { currentWorkspaceFolder, outputConsole } from "../utils";
 
-const DEFAULT_API_VERSION: number = 3;
+const DEFAULT_API_VERSION: number = 1;
+// require("request-promise").debug = true;
 
 export class AtelierAPI {
-  private cookies: string[] = [];
-  private _config: any;
-  private _namespace: string;
-  private static _apiVersion: number;
+  private config: any;
+  private namespace: string;
+  private cache;
+  private workspaceFolder;
 
-  private get ns(): string {
-    return this._namespace || this._config.ns;
+  public get ns(): string {
+    return this.namespace || this.config.ns;
   }
 
   private get apiVersion(): number {
-    return AtelierAPI._apiVersion || DEFAULT_API_VERSION;
+    return workspaceState.get(
+      this.workspaceFolder + ":apiVersion",
+      DEFAULT_API_VERSION,
+    );
   }
 
-  constructor() {
-    this.setConnection(currentWorkspaceFolder());
-  }
-
-  setNamespace(namespace: string) {
-    this._namespace = namespace;
-  }
-
-  setApiVersion(apiVersion: number) {
-    AtelierAPI._apiVersion = apiVersion;
-  }
-
-  updateCookies(cookies: string[]) {
-    cookies.forEach(cookie => {
-      let [cookieName] = cookie.split('=');
-      let index = this.cookies.findIndex(el => el.startsWith(cookieName));
-      if (index) {
-        this.cookies[index] = cookie;
+  constructor(wsOrFile?: string | vscode.Uri) {
+    let workspaceFolderName: string = "";
+    if (wsOrFile) {
+      if (wsOrFile instanceof vscode.Uri) {
+        if (wsOrFile.scheme === FILESYSTEM_SCHEMA) {
+          workspaceFolderName = wsOrFile.authority;
+          const query = url.parse(decodeURIComponent(wsOrFile.toString()), true)
+            .query;
+          if (query) {
+            if (query.ns && query.ns !== "") {
+              const namespace = query.ns.toString();
+              this.setNamespace(namespace);
+            }
+          }
+        }
       } else {
-        this.cookies.push(cookie);
+        workspaceFolderName = wsOrFile;
+      }
+    }
+    this.setConnection(workspaceFolderName || currentWorkspaceFolder());
+  }
+
+  public setNamespace(namespace: string) {
+    this.namespace = namespace;
+  }
+
+  get cookies(): string[] {
+    return this.cache.get("cookies", []);
+  }
+
+  public updateCookies(newCookies: string[]): Promise<any> {
+    const cookies = this.cache.get("cookies", []);
+    newCookies.forEach((cookie) => {
+      const [cookieName] = cookie.split("=");
+      const index = cookies.findIndex((el) => el.startsWith(cookieName));
+      if (index >= 0) {
+        cookies[index] = cookie;
+      } else {
+        cookies.push(cookie);
       }
     });
+    return this.cache.put("cookies", cookies);
   }
 
-  setConnection(workspaceFolderName: string) {
-    let conn = config('conn', workspaceFolderName);
-    this._config = conn;
+  public setConnection(workspaceFolderName: string) {
+    this.workspaceFolder = workspaceFolderName;
+    const conn = config("conn", workspaceFolderName);
+    this.config = conn;
+    const { name, host, port } = this.config;
+    this.cache = new Cache(extensionContext, `API:${name}:${host}:${port}`);
   }
 
-  async request(method: string, path?: string, body?: any, params?: any, headers?: any): Promise<any> {
-    if (!this._config.active) {
+  public async request(
+    minVersion: number,
+    method: string,
+    path?: string,
+    body?: any,
+    params?: any,
+    headers?: any,
+  ): Promise<any> {
+    if (minVersion > this.apiVersion) {
+      return Promise.reject(
+        `${path} not supported by API version ${this.apiVersion}`,
+      );
+    }
+    if (minVersion && minVersion > 0) {
+      path = `v${this.apiVersion}/${path}`;
+    }
+    if (!this.config.active) {
       return Promise.reject();
     }
     headers = {
       ...headers,
-      Accept: 'application/json',
-      Cookie: this.cookies
+      Accept: "application/json",
     };
     const buildParams = (): string => {
       if (!params) {
-        return '';
+        return "";
       }
-      let result = [];
-      Object.keys(params).forEach(key => {
+      const result = [];
+      Object.keys(params).forEach((key) => {
         let value = params[key];
-        if (value && value !== '') {
-          if (typeof value === 'boolean') {
-            value = value ? '1' : '0';
+        if (value && value !== "") {
+          if (typeof value === "boolean") {
+            value = value ? "1" : "0";
           }
           result.push(`${key}=${value}`);
         }
       });
-      return result.length ? '?' + result.join('&') : '';
+      return result.length ? "?" + result.join("&") : "";
     };
     method = method.toUpperCase();
-    if (['PUT', 'POST'].includes(method) && !headers['Content-Type']) {
-      headers['Content-Type'] = 'application/json';
+    if (["PUT", "POST"].includes(method) && !headers["Content-Type"]) {
+      headers["Content-Type"] = "application/json";
     }
-    headers['Cache-Control'] = 'no-cache';
+    headers["Cache-Control"] = "no-cache";
 
-    const { host, port, username, password } = this._config;
-    const http: any = this._config.https ? httpsModule : httpModule;
-    const agent = new http.Agent({ keepAlive: true, maxSockets: 10 });
-    path = encodeURI(`/api/atelier/${path || ''}${buildParams()}`);
-    console.log(`API request: ${method} ${path}`);
+    const { host, port, username, password, https } = this.config;
+    const proto = this.config.https ? "https" : "http";
+    const http: any = this.config.https ? httpsModule : httpModule;
+    const agent = new http.Agent({
+      keepAlive: true,
+      maxSockets: 10,
+      rejectUnauthorized: https && config("http.proxyStrictSSL"),
+    });
+    path = encodeURI(`/api/atelier/${path || ""}${buildParams()}`);
 
-    if (headers['Content-Type'] && headers['Content-Type'].includes('json')) {
-      body = JSON.stringify(body);
+    const cookies = this.cookies;
+    let auth;
+    if (cookies.length || method === "HEAD") {
+      auth = Promise.resolve(cookies);
+    } else if (!cookies.length) {
+      auth = this.request(0, "HEAD");
     }
-
-    return new Promise((resolve, reject) => {
-      const req: httpModule.ClientRequest = http
-        .request(
-          {
-            method,
-            host,
-            port,
-            path,
-            agent,
-            auth: `${username}:${password}`,
-            headers,
-            body
-          },
-          (response: httpModule.IncomingMessage) => {
-            if (response.statusCode < 200 || response.statusCode > 299) {
-              reject(new Error('Failed to load page "' + path + '", status code: ' + response.statusCode));
-            }
-            this.updateCookies(response.headers['set-cookie']);
-            // temporary data holder
-            let body: string = '';
-            response.on('data', chunk => {
-              body += chunk;
-            });
-            response.on('end', () => {
-              if (response.headers['content-type'].includes('json')) {
-                const json = JSON.parse(body);
-                if (json.console) {
-                  outputConsole(json.console);
-                }
-                if (json.result.status) {
-                  reject(new Error(json.result.status));
-                  return;
-                }
-                resolve(json);
-              } else {
-                resolve(body);
-              }
-            });
+    return auth.then((cookie) => {
+      return request({
+        agent,
+        auth: { username, password, sendImmediately: false },
+        body: ["PUT", "POST"].includes(method) ? body : null,
+        headers: {
+          ...headers,
+          Cookie: cookie,
+        },
+        json: true,
+        method,
+        resolveWithFullResponse: true,
+        simple: true,
+        uri: `${proto}://${host}:${port}${path}`,
+      })
+        // .catch(error => error.error)
+        .then((response) => this.updateCookies(response.headers["set-cookie"]).then(() => response))
+        .then((response) => {
+          // console.log(`APIResponse: ${method} ${proto}://${host}:${port}${path}`)
+          if (method === "HEAD") {
+            return this.cookies;
           }
-        )
-        .on('error', error => {
-          reject(error);
+          const data = response.body;
+          if (data.console) {
+            outputConsole(data.console);
+          }
+          if (data.status.summary) {
+            throw new Error(data.status.summary);
+          } else if (data.result.status) {
+            throw new Error(data.result.status);
+          } else {
+            return data;
+          }
+        })
+        .catch((error) => {
+          console.error(error);
+          throw error;
         });
-      if (['PUT', 'POST'].includes(method)) {
-        req.write(body);
-      }
-      req.end();
-    }).catch(error => {
-      console.error(error);
-      throw error;
     });
   }
 
-  serverInfo(): Promise<any> {
-    return this.request('GET');
+  public serverInfo(): Promise<any> {
+    return this.request(0, "GET")
+      .then((info) => {
+        if (
+          info &&
+          info.result &&
+          info.result.content &&
+          info.result.content.api > 0
+        ) {
+          const data = info.result.content;
+          const apiVersion = data.api;
+          if (!data.namespaces.includes(this.ns)) {
+            throw {
+              code: "WrongNamespace",
+              message: "This server does not have specified namespace.",
+            };
+          }
+          return workspaceState
+            .update(currentWorkspaceFolder() + ":apiVersion", apiVersion)
+            .then(() => info);
+        }
+      });
   }
   // api v1+
-  getDocNames({
+  public getDocNames({
     generated = false,
-    category = '*',
-    type = '*',
-    filter = ''
+    category = "*",
+    type = "*",
+    filter = "",
   }: {
     generated?: boolean;
     category?: string;
     type?: string;
     filter?: string;
   }): Promise<any> {
-    return this.request('GET', `v${this.apiVersion}/${this.ns}/docnames/${category}/${type}`, null, {
-      filter,
-      generated
-    });
+    return this.request(
+      1,
+      "GET",
+      `${this.ns}/docnames/${category}/${type}`,
+      null,
+      {
+        filter,
+        generated,
+      },
+    );
   }
   // api v1+
-  getDoc(name: string, format?: string): Promise<any> {
+  public getDoc(name: string, format?: string): Promise<any> {
     let params = {};
     if (format) {
       params = {
-        format
+        format,
       };
     }
-    return this.request('GET', `v${this.apiVersion}/${this.ns}/doc/${name}`, params);
+    return this.request(1, "GET", `${this.ns}/doc/${name}`, params);
+  }
+  // api v1+
+  public deleteDoc(name: string): Promise<any> {
+    return this.request(1, "DELETE", `${this.ns}/doc/${name}`);
   }
   // v1+
-  putDoc(name: string, data: { enc: boolean; content: string[] }, ignoreConflict?: boolean): Promise<any> {
-    let params = { ignoreConflict };
-    return this.request('PUT', `v${this.apiVersion}/${this.ns}/doc/${name}`, data, params);
+  public putDoc(
+    name: string,
+    data: { enc: boolean; content: string[] },
+    ignoreConflict?: boolean,
+  ): Promise<any> {
+    const params = { ignoreConflict };
+    return this.request(1, "PUT", `${this.ns}/doc/${name}`, data, params);
   }
   // v1+
-  actionIndex(docs: string[]): Promise<any> {
-    return this.request('POST', `v${this.apiVersion}/${this.ns}/action/index`, docs);
+  public actionIndex(docs: string[]): Promise<any> {
+    return this.request(1, "POST", `${this.ns}/action/index`, docs);
   }
   // v2+
-  actionSearch(params: { query: string; files?: string; sys?: boolean; gen?: boolean; max?: number }): Promise<any> {
-    return this.apiVersion >= 2 ? 
-      this.request('GET', `v${this.apiVersion}/${this.ns}/action/search`, null, params) : 
-      Promise.reject(`Method 'search' not supported by API version ${this.apiVersion}`);
+  public actionSearch(params: {
+    query: string;
+    files?: string;
+    sys?: boolean;
+    gen?: boolean;
+    max?: number;
+  }): Promise<any> {
+    return this.request(2, "GET", `${this.ns}/action/search`, null, params);
   }
   // v1+
-  actionQuery(query: string, parameters: string[]): Promise<any> {
-    return this.request('POST', `v${this.apiVersion}/${this.ns}/action/query`, {
+  public actionQuery(query: string, parameters: string[]): Promise<any> {
+    // outputChannel.appendLine('SQL: ' + query);
+    // outputChannel.appendLine('SQLPARAMS: ' + JSON.stringify(parameters));
+    return this.request(1, "POST", `${this.ns}/action/query`, {
+      parameters,
       query,
-      parameters
     });
   }
   // v1+
-  actionCompile(docs: string[], flags?: string, source = false): Promise<any> {
-    return this.request('POST', `v${this.apiVersion}/${this.ns}/action/compile`, docs, { flags, source });
+  public actionCompile(docs: string[], flags?: string, source = false): Promise<any> {
+    return this.request(1, "POST", `${this.ns}/action/compile`, docs, {
+      flags,
+      source,
+    });
   }
 
-  cvtXmlUdl(source: string): Promise<any> {
-    return this.request('POST', `v${this.apiVersion}/${this.ns}/cvt/xml/doc`, source, {}, { 'Content-Type': 'application/xml' });
+  public cvtXmlUdl(source: string): Promise<any> {
+    return this.request(
+      1,
+      "POST",
+      `${this.ns}/`,
+      source,
+      {},
+      { "Content-Type": "application/xml" },
+    );
   }
   // v2+
-  getmacrodefinition(docname: string, macroname: string, includes: string[]) {
-    return this.apiVersion >= 2 ? 
-      this.request('POST', `v${this.apiVersion}/${this.ns}/action/getmacrodefinition`, {
-        docname,
-        macroname,
-        includes
-      }) :
-      Promise.reject(`Method 'getmacrodefinition' not supported by API version ${this.apiVersion}`);
+  public getmacrodefinition(docname: string, macroname: string, includes: string[]) {
+    return this.request(2, "POST", `${this.ns}/action/getmacrodefinition`, {
+      docname,
+      includes,
+      macroname,
+    });
   }
   // v2+
-  getmacrolocation(docname: string, macroname: string, includes: string[]) {
-    return this.apiVersion >= 2 ? 
-      this.request('POST', `v${this.apiVersion}/${this.ns}/action/getmacrolocation`, {
-        docname,
-        macroname,
-        includes
-      }) :
-      Promise.reject(`Method 'getmacrolocation' not supported by API version ${this.apiVersion}`);
+  public getmacrolocation(docname: string, macroname: string, includes: string[]) {
+    return this.request(2, "POST", `${this.ns}/action/getmacrolocation`, {
+      docname,
+      includes,
+      macroname,
+    });
+  }
+  // v2+
+  public getmacrollist(docname: string, includes: string[]) {
+    return this.request(2, "POST", `${this.ns}/action/getmacrolist`, {
+      docname,
+      includes,
+    });
   }
 }

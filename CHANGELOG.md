@@ -1,5 +1,31 @@
 # Change Log
 
+## [0.7.12]
+
+- Files in Server Explorer now can be edited.
+- Added more details about connection errors.
+- Improvements in Server Explorer build tree.
+- Fixed memory leak when exporting large amount of files.
+- Some other fixes
+- Server view can be opened in explorer as virtual file system with schema `isfs://`
+
+## [0.7.11]
+
+- added export setting "objectscript.export.addCategory" if enabled uses previous behavior, adds category folder to export folder, disabled by default
+- added Server actions menu, by clicking on server info from status bar. Open Management portal, Class Reference and toggle connection.
+- Class Suggestion in ##class, Extends, As, CompileAfter, DependsOn, PropertyClass
+- \$SYSTEM suggestion by Classes from %SYSTEM
+- Import and compile folder or file by context menu in File explorer
+- Server Explorer, now possible to open any other namespace
+- Macros suggestion
+
+## [0.7.10]
+
+- New logo
+- Fixed backward compatibility with previous versions of Atelier API
+- Fixed issue with license usage, due to loosing cookies
+- Some other small fixes
+
 ## [0.7.9]
 
 - IMPORTANT: **Connection disabled by default, now**. Set `"objectscript.conn.active": true` to enable it
@@ -20,6 +46,7 @@
 - Go to macros definition
 - Go to definition for methods and properties for self object like `..Name`, `..SomeMethod()`
 - Added completion for class parameters
+- Export without storage
 
 ## [0.7.7]
 
